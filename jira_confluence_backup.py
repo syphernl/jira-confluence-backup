@@ -247,7 +247,7 @@ if __name__ == "__main__":
     username = args.username
     password = args.password
     location = args.location
-    timeout = args.timeout
+    timeout = int(args.timeout)
 
     if args.log:
         log = True
