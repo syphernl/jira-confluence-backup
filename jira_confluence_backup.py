@@ -1,20 +1,21 @@
-import requests
-import json
-import time
-import datetime
-from sys import stdout, exit
 import argparse
+import datetime
 import getpass
-import os
+import json
 import logging
+import os
+import time
 from logging.handlers import SysLogHandler
+from sys import stdout, exit
+
+import requests
+
 
 # Argparse action extension to alternatively accept passwords directly
 # or via a prompt in the console
 
 
 class Password(argparse.Action):
-
     def __call__(self, parser, namespace, values, option_string):
         if values is None:
             values = getpass.getpass()
@@ -73,6 +74,7 @@ class LogMessage:
     '''
     Simple local syslog logger
     '''
+
     def __init__(self, application):
         self._logger = logging.getLogger('BackupLogger')
         self._logger.setLevel(logging.INFO)
@@ -95,8 +97,8 @@ def set_urls():
     global download_url
     if application.upper() == 'CONFLUENCE':
         trigger_url = 'https://' + instance + '/wiki/rest/obm/1.0/runbackup'
-        progress_url = 'https://' + instance +\
-            '/wiki/rest/obm/1.0/getprogress.json'
+        progress_url = 'https://' + instance + \
+                       '/wiki/rest/obm/1.0/getprogress.json'
         download_url = 'https://' + instance + '/wiki/download/'
         return
     if application.upper() == 'JIRA':
@@ -113,13 +115,17 @@ def set_urls():
 def create_session(username, password):
     s = requests.session()
     # create a session
-    r = s.post('https://' + instance + '/login',
-               {'username': username,
-                'password': password})
+    url = 'https://' + instance + '/rest/auth/1/session'
+    print url
+    r = s.post(url=url,
+               data=json.dumps({'username': username, 'password': password}),
+               headers={'Content-Type': 'application/json'})
     if int(r.status_code) == 200:
         return s
     else:
         print "Session creation failed"
+        print int(r.status_code)
+        print r.content
         exit(1)
 
 
@@ -156,7 +162,7 @@ def monitor(s):
     # Timeout waiting for remote backup to complete
     # (since it sometimes fails) in 5s multiples
     global timeout
-    timeout_count = timeout*12  # timeout x 12 = number of iterations of 5s
+    timeout_count = timeout * 12  # timeout x 12 = number of iterations of 5s
     time_left = timeout
     while 'fileName' not in progress_data or timeout_count > 0:
         # Clears the line before re-writing to avoid artifacts
@@ -222,7 +228,7 @@ def download(s, l):
                 if chunk:
                     f.write(chunk)
                     file_total = file_total + 1024
-                    file_total_m = float(file_total)/1048576
+                    file_total_m = float(file_total) / 1048576
                     # Clears the line before re-writing to avoid artifacts
                     stdout.write("\r\x1b[2k")
                     stdout.write("\r\x1b[2K%.2fMB   downloaded" % file_total_m)
@@ -232,7 +238,7 @@ def download(s, l):
         return result
     else:
         print "Download file not found on remote server - response code %s" % \
-            str(r.status_code)
+              str(r.status_code)
         print "Download url: %s" % download_url + filename
         result = ['Download file not found on remote server', False]
         return result
@@ -240,7 +246,7 @@ def download(s, l):
 
 if __name__ == "__main__":
     args = set_arguments()
-    global trigger_url, progress_url, download_url,\
+    global trigger_url, progress_url, download_url, \
         instance, application, log, timeout
     application = args.application
     instance = args.instance + ".atlassian.net"
