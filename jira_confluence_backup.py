@@ -1,20 +1,21 @@
-import requests
-import json
-import time
-import datetime
-from sys import stdout, exit
 import argparse
+import datetime
 import getpass
-import os
+import json
 import logging
+import os
+import time
 from logging.handlers import SysLogHandler
+from sys import stdout, exit
+
+import requests
+
 
 # Argparse action extension to alternatively accept passwords directly
 # or via a prompt in the console
 
 
 class Password(argparse.Action):
-
     def __call__(self, parser, namespace, values, option_string):
         if values is None:
             values = getpass.getpass()
@@ -37,6 +38,9 @@ def set_arguments():
                         help='Timeout for the remote backup to complete,\
                         defaults to 180 minutes',
                         default=180)
+    parser.add_argument('--taskid', '-d',
+                        help='Task id to operate upon',
+                        default=None)
     parser.add_argument('--password', '-p',
                         action=Password,
                         nargs='?', dest='password',
@@ -73,6 +77,7 @@ class LogMessage:
     '''
     Simple local syslog logger
     '''
+
     def __init__(self, application):
         self._logger = logging.getLogger('BackupLogger')
         self._logger.setLevel(logging.INFO)
@@ -95,14 +100,14 @@ def set_urls():
     global download_url
     if application.upper() == 'CONFLUENCE':
         trigger_url = 'https://' + instance + '/wiki/rest/obm/1.0/runbackup'
-        progress_url = 'https://' + instance +\
-            '/wiki/rest/obm/1.0/getprogress.json'
+        progress_url = 'https://' + instance + \
+                       '/wiki/rest/obm/1.0/getprogress.json'
         download_url = 'https://' + instance + '/wiki/download/'
         return
     if application.upper() == 'JIRA':
-        trigger_url = 'https://' + instance + '/rest/obm/1.0/runbackup'
-        progress_url = 'https://' + instance + '/rest/obm/1.0/getprogress.json'
-        download_url = 'https://' + instance
+        trigger_url = 'https://' + instance + '/rest/backup/1/export/runbackup'
+        progress_url = 'https://' + instance + '/rest/internal/2/task/progress/{0}'
+        download_url = 'https://' + instance + '/plugins/servlet/export/download/'
         return
     if application.upper() != 'JIRA' or 'CONFLUENCE':
         print "Invalid application specified. \
@@ -113,26 +118,41 @@ def set_urls():
 def create_session(username, password):
     s = requests.session()
     # create a session
-    r = s.post('https://' + instance + '/login',
-               {'username': username,
-                'password': password})
+    url = 'https://' + instance + '/rest/auth/1/session'
+    print url
+    r = s.post(url=url,
+               data=json.dumps({'username': username, 'password': password}),
+               headers={'Content-Type': 'application/json'})
     if int(r.status_code) == 200:
         return s
     else:
         print "Session creation failed"
+        print int(r.status_code)
+        print r.content
         exit(1)
 
 
 def trigger(s):
+    global taskId
+    postData = json.dumps({'cbAttachments': 'true', 'exportToCloud': 'true'})
+
     r = s.post(url=trigger_url,
-               data=json.dumps({'cbAttachments': 'true'}),
+               data=postData,
                headers={'Content-Type': 'application/json',
+                        # 'accept': 'application/json',
                         'X-Atlassian-Token': 'no-check',
                         'X-Requested-With': 'XMLHttpRequest'})
     print "Trigger response: %s" % r.status_code
     if int(r.status_code) == 200:
         print "Trigger response successful"
-        result = ['Trigger response successful', True]
+        if application.upper() == 'JIRA':
+            json_data = json.loads(r.text)
+            try:
+                taskId = json_data['taskId']
+            except:
+                bkp_err = json_data['error']
+                result = ['Trigger failed with message: %s' % str(bkp_err), False]
+        result = ['Trigger response successful for task %s' % str(taskId), True]
         return result
     else:
         print 'Trigger failed'
@@ -143,6 +163,14 @@ def trigger(s):
 
 
 def monitor(s):
+    global progress_url
+    if application.upper() == 'JIRA':
+        if taskId is None:
+            return ['Monitor failed due to missing taskId', False]
+
+        # Append the task id to the job
+        progress_url = progress_url.format(taskId)
+
     r = s.get(url=progress_url)
     try:
         progress_data = json.loads(r.text)
@@ -155,14 +183,23 @@ def monitor(s):
         Return code: %s """ % (r.status_code)', False]
     # Timeout waiting for remote backup to complete
     # (since it sometimes fails) in 5s multiples
+
     global timeout
-    timeout_count = timeout*12  # timeout x 12 = number of iterations of 5s
+    timeout_count = timeout * 12  # timeout x 12 = number of iterations of 5s
     time_left = timeout
-    while 'fileName' not in progress_data or timeout_count > 0:
+
+    completed = False
+
+    nested_data = None
+    if 'result' in progress_data:
+        nested_data = json.loads(progress_data['result'])
+
+    while not completed:
         # Clears the line before re-writing to avoid artifacts
         stdout.write("\r\x1b[2k")
-        stdout.write("\r\x1b[2K%s. Timeout remaining: %sm"
-                     % (progress_data['alternativePercentage'],
+        stdout.write("\r\x1b[2K%s (%s). Timeout remaining: %sm"
+                     % (str(progress_data['progress'] if 'progress' in progress_data else str(progress_data['alternativePercentage'])),
+                        str(progress_data['description']) if 'description' in progress_data else str(progress_data['currentStatus']),
                         str(time_left)))
         stdout.flush()
         r = s.get(url=progress_url)
@@ -171,13 +208,37 @@ def monitor(s):
         timeout_count = timeout_count - 5
         if timeout_count % 12 == 0:
             time_left = time_left - 1
+
+        if nested_data and 'fileName' in nested_data:  # JIRA new infra
+            completed = True
+        elif 'fileName' in progress_data:  # Confluence
+            completed = True
+        elif timeout_count == 0:  # Falltrough
+            completed = True
+
+    # JIRA new infra
+    if nested_data and 'fileName' in nested_data:
+        result = [nested_data['fileName'], True]
+        return result
+
+    # Confluence (old) infra
     if 'fileName' in progress_data:
         result = [progress_data['fileName'], True]
         return result
 
 
 def get_filename(s):
+    global progress_url
+    if application.upper() == 'JIRA':
+        if taskId is None:
+            print 'Unable to obtain without taskid (JIRA).'
+            return False
+
+        # Append the task id to the job
+        progress_url = progress_url.format(taskId)
+
     print "Fetching file name"
+
     r = s.get(url=progress_url)
     try:
         progress_data = json.loads(r.text)
@@ -186,11 +247,17 @@ def get_filename(s):
         Get progress failed to return expected data.
         Return code: %s """ % (r.status_code)
         return False
-    if 'fileName' not in progress_data:
-        print 'File name to download not found in server response.'
-        return False
-    else:
+
+    if 'fileName' in progress_data:
         return progress_data['fileName']
+
+    if 'result' in progress_data:
+        nested_response = json.loads(progress_data['result'])
+        if 'fileName' in nested_response:
+            return nested_response['mediaFileId'] + '/' + nested_response['fileName']
+
+    print 'File name to download not found in server response.'
+    return False
 
 
 def create_backup_location(l):
@@ -208,8 +275,10 @@ def download(s, l):
         return False
     print "Filename found: %s" % filename
     print "Checking if url is valid"
+
     r = s.get(url=download_url + filename, stream=True)
     print "Status code: %s" % str(r.status_code)
+
     if int(r.status_code) == 200:
         print "Url returned '200', downloading file"
         if not create_backup_location(l):
@@ -222,7 +291,7 @@ def download(s, l):
                 if chunk:
                     f.write(chunk)
                     file_total = file_total + 1024
-                    file_total_m = float(file_total)/1048576
+                    file_total_m = float(file_total) / 1048576
                     # Clears the line before re-writing to avoid artifacts
                     stdout.write("\r\x1b[2k")
                     stdout.write("\r\x1b[2K%.2fMB   downloaded" % file_total_m)
@@ -232,7 +301,7 @@ def download(s, l):
         return result
     else:
         print "Download file not found on remote server - response code %s" % \
-            str(r.status_code)
+              str(r.status_code)
         print "Download url: %s" % download_url + filename
         result = ['Download file not found on remote server', False]
         return result
@@ -240,14 +309,15 @@ def download(s, l):
 
 if __name__ == "__main__":
     args = set_arguments()
-    global trigger_url, progress_url, download_url,\
+    global trigger_url, progress_url, download_url, \
         instance, application, log, timeout
     application = args.application
     instance = args.instance + ".atlassian.net"
     username = args.username
     password = args.password
     location = args.location
-    timeout = args.timeout
+    timeout = int(args.timeout)
+    taskId = args.taskid
 
     if args.log:
         log = True
