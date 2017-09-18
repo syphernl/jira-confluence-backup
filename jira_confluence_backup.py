@@ -132,16 +132,29 @@ def create_session(username, password):
         exit(1)
 
 
+def get_last_task_id(s):
+    url = 'https://{0}/rest/backup/1/export/lastTaskId'.format(instance)
+    r = s.get(url=url)
+    if int(r.status_code) == 200:
+        return str(r.text)
+
+    return None
+
+
 def trigger(s):
     global taskId
     postData = json.dumps({'cbAttachments': 'true', 'exportToCloud': 'true'})
+    headers = {'Content-Type': 'application/json',
+               'accept': 'application/json, text/javascript, */*; q=0.01',
+               'X-Atlassian-Token': 'no-check',
+               'pragma': 'no-cache',
+               'cache-control': 'no-cache',
+               'authority': instance,
+               'X-Requested-With': 'XMLHttpRequest'}
 
     r = s.post(url=trigger_url,
                data=postData,
-               headers={'Content-Type': 'application/json',
-                        # 'accept': 'application/json',
-                        'X-Atlassian-Token': 'no-check',
-                        'X-Requested-With': 'XMLHttpRequest'})
+               headers=headers)
     print "Trigger response: %s" % r.status_code
     if int(r.status_code) == 200:
         print "Trigger response successful"
@@ -157,16 +170,23 @@ def trigger(s):
     else:
         print 'Trigger failed'
         if int(r.status_code) == 500:
-            print 'Returned text data: %s' % str(r.text)
-        result = ['Trigger failed with message: %s' % str(r.text), False]
+            print('Returned text data: %s' % str(r.text))
+            result = ['Trigger failed with message: %s' % str(r.text), False]
+        elif int(r.status_code) == 412:
+            json_data = json.loads(r.text)
+            print('Returned text data: %s' % str(json_data['error']))
+            result = ['Trigger failed with message: %s' % str(json_data['error']), False]
         return result
 
 
 def monitor(s):
-    global progress_url
+    global progress_url, taskId
     if application.upper() == 'JIRA':
         if taskId is None:
-            return ['Monitor failed due to missing taskId', False]
+            print("Trying to retrieve task ID from JIRA..")
+            taskId = get_last_task_id(s)
+            if taskId is None:
+                return ['Monitor failed due to missing taskId', False]
 
         # Append the task id to the job
         progress_url = progress_url.format(taskId)
@@ -198,8 +218,10 @@ def monitor(s):
         # Clears the line before re-writing to avoid artifacts
         stdout.write("\r\x1b[2k")
         stdout.write("\r\x1b[2K%s (%s). Timeout remaining: %sm"
-                     % (str(progress_data['progress'] if 'progress' in progress_data else str(progress_data['alternativePercentage'])),
-                        str(progress_data['description']) if 'description' in progress_data else str(progress_data['currentStatus']),
+                     % (str(
+            progress_data['progress'] if 'progress' in progress_data else str(progress_data['alternativePercentage'])),
+                        str(progress_data['description']) if 'description' in progress_data else str(
+                            progress_data['currentStatus']),
                         str(time_left)))
         stdout.flush()
         r = s.get(url=progress_url)
@@ -228,11 +250,14 @@ def monitor(s):
 
 
 def get_filename(s):
-    global progress_url
+    global progress_url, taskId
     if application.upper() == 'JIRA':
         if taskId is None:
-            print 'Unable to obtain without taskid (JIRA).'
-            return False
+            print("Trying to retrieve task ID from JIRA..")
+            taskId = get_last_task_id(s)
+            if taskId is None:
+                print 'Unable to obtain without taskid (JIRA).'
+                return False
 
         # Append the task id to the job
         progress_url = progress_url.format(taskId)
