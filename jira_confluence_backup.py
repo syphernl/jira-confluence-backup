@@ -138,7 +138,8 @@ def get_last_task_id(s):
     if int(r.status_code) == 200:
         return str(r.text)
 
-    return None
+    print('Taskid not found in server response.')
+    return False
 
 
 def trigger(s):
@@ -185,7 +186,7 @@ def monitor(s):
         if taskId is None:
             print("Trying to retrieve task ID from JIRA..")
             taskId = get_last_task_id(s)
-            if taskId is None:
+            if not taskId:
                 return ['Monitor failed due to missing taskId', False]
 
         # Append the task id to the job
@@ -255,7 +256,7 @@ def get_filename(s):
         if taskId is None:
             print("Trying to retrieve task ID from JIRA..")
             taskId = get_last_task_id(s)
-            if taskId is None:
+            if not taskId:
                 print 'Unable to obtain without taskid (JIRA).'
                 return False
 
